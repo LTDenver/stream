@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SoBo Slideshow</title>
+<meta name="viewport" content="width=416,height=423">
+<!--
+  SoBo Silverball – Open Frame slideshow
+  ---------------------------------------
+  Put this file in your GitHub Pages repo (e.g. ltdenver/stream) and put your
+  images in a "slides" folder next to it. Every image in that folder is shown
+  automatically, in filename order (name them 01-xxx.jpg, 02-xxx.jpg ... to set the order).
+  To change the slideshow: add, delete or replace files in /slides. No editing needed.
+
+  URL options (all optional):
+    ?folder=slides     folder holding the images
+    &hold=6            seconds each image stays on screen
+    &fade=1.5          fade duration in seconds
+    &fit=cover         cover = fill the frame (crops edges), contain = show whole image
+    &w=416&h=423       page size in pixels (default = Open Frame size)
+    &shuffle=1         random order
+    &bg=000000         background color behind images (default transparent)
+    &refresh=10        minutes between checks for new/removed images
+    &repo=ltdenver/stream   only needed if not hosted on <user>.github.io/<repo>/
+-->
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:transparent}
+  #stage{position:relative;overflow:hidden}
+  #stage img{position:absolute;inset:0;width:100%;height:100%;opacity:0;
+             transition:opacity var(--fade,1.5s) ease-in-out}
+  #stage img.on{opacity:1}
+  #msg{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+       font:600 18px/1.3 system-ui,sans-serif;color:#5ef2ff;text-align:center;padding:16px;
+       background:rgba(0,0,0,.55)}
+</style>
+</head>
+<body>
+<div id="stage"><div id="msg"></div></div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const FOLDER  = (q.get('folder') || 'slides').replace(/^\/+|\/+$/g, '');
+  const HOLD    = (+q.get('hold') || 6) * 1000;
+  const FADE    = +q.get('fade') || 1.5;
+  const FIT     = q.get('fit') === 'contain' ? 'contain' : 'cover';
+  const W       = +q.get('w') || 416, H = +q.get('h') || 423;
+  const SHUFFLE = q.get('shuffle') === '1';
+  const REFRESH = (+q.get('refresh') || 10) * 60 * 1000;
+  const BG      = q.get('bg');
+  const IMG_RE  = /\.(jpe?g|png|gif|webp|avif|svg)$/i;
+
+  const stage = document.getElementById('stage');
+  const msg = document.getElementById('msg');
+  stage.style.width = W + 'px'; stage.style.height = H + 'px';
+  document.body.style.width = W + 'px'; document.body.style.height = H + 'px';
+  stage.style.setProperty('--fade', FADE + 's');
+  if (BG) stage.style.background = '#' + BG.replace('#', '');
+
+  // Work out owner/repo from a GitHub Pages address like https://ltdenver.github.io/stream/...
+  function repoFromLocation() {
+    if (q.get('repo')) return q.get('repo');
+    const m = location.hostname.match(/^([^.]+)\.github\.io$/i);
+    if (!m) return null;
+    const first = location.pathname.split('/').filter(Boolean)[0];
+    const repo = (first && !first.includes('.')) ? first : `${m[1]}.github.io`;
+    return `${m[1]}/${repo}`;
+  }
+
+  // Base URL of the folder, relative to this page
+  const folderURL = new URL(FOLDER + '/', location.href).href;
+
+  async function listFromGitHub() {
+    const repo = repoFromLocation();
+    if (!repo) throw new Error('not on github.io');
+    const r = await fetch(`https://api.github.com/repos/${repo}/contents/${FOLDER}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('GitHub API ' + r.status);
+    const items = await r.json();
+    // use the file's sha as a cache-buster so a replaced image (same name) shows the new version
+    return items.filter(i => i.type === 'file' && IMG_RE.test(i.name))
+                .map(i => ({ name: i.name, url: folderURL + encodeURIComponent(i.name) + '?v=' + i.sha.slice(0, 8) }));
+  }
+
+  // Fallback: a plain list in slides/list.json  e.g. ["01-league.jpg","02-tourney.png"]
+  async function listFromManifest() {
+    const r = await fetch(folderURL + 'list.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('no list.json');
+    const names = await r.json();
+    return names.filter(n => IMG_RE.test(n))
+                .map(n => ({ name: n, url: folderURL + encodeURIComponent(n) + '?t=' + Math.floor(Date.now() / REFRESH) }));
+  }
+
+  async function getList() {
+    let list;
+    try { list = await listFromGitHub(); }
+    catch (e) { list = await listFromManifest(); }
+    list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    if (SHUFFLE) for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j], list[i]]; }
+    return list;
+  }
+
+  let slides = [], idx = -1, layers = [], timer = null;
+
+  function makeLayer() {
+    const img = document.createElement('img');
+    img.alt = ''; img.style.objectFit = FIT; img.decoding = 'async';
+    stage.insertBefore(img, msg); return img;
+  }
+  layers = [makeLayer(), makeLayer()];
+  let front = 0;
+
+  function preload(url) {
+    return new Promise(res => { const i = new Image(); i.onload = () => res(true); i.onerror = () => res(false); i.src = url; });
+  }
+
+  async function next() {
+    if (!slides.length) return;
+    // try up to slides.length images in case one fails to load
+    for (let tries = 0; tries < slides.length; tries++) {
+      idx = (idx + 1) % slides.length;
+      const s = slides[idx];
+      if (await preload(s.url)) {
+        const back = 1 - front;
+        layers[back].src = s.url;
+        layers[back].classList.add('on');      // fade new image in on top...
+        layers[front].classList.remove('on');  // ...while the old one fades out
+        layers[back].style.zIndex = 2; layers[front].style.zIndex = 1;
+        front = back;
+        break;
+      }
+    }
+    if (slides.length > 1) timer = setTimeout(next, HOLD + FADE * 1000);
+  }
+
+  function show(text) { msg.textContent = text; msg.style.display = text ? 'flex' : 'none'; }
+
+  async function load(first) {
+    try {
+      const list = await getList();
+      const changed = list.map(s => s.url).join('|') !== slides.map(s => s.url).join('|');
+      if (!list.length) { show(`No images found in /${FOLDER}`); slides = []; return; }
+      show('');
+      if (changed) {
+        slides = list;
+        if (idx >= slides.length) idx = -1;
+        // (re)start the cycle on first load, or if it had stopped (e.g. was down to one image)
+        if (first || !timer) { clearTimeout(timer); timer = null; if (first) idx = -1; next(); }
+      }
+    } catch (e) {
+      if (first) show(`Couldn't load images from /${FOLDER}`);
+    }
+  }
+
+  load(true);
+  setInterval(() => load(false), REFRESH);
+})();
+</script>
+</body>
+</html>
